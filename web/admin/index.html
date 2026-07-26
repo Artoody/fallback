@@ -98,6 +98,15 @@
         </form>
         <p id="gemini-error" class="error hidden"></p>
 
+        <details class="bulk-import">
+          <summary>➕ افزودن دسته‌ای چند کلید (مثل .env)</summary>
+          <form id="bulk-form">
+            <textarea id="bulk-keys" rows="4" placeholder="AIzaSy...&#10;AIzaSy...&#10;AIzaSy..., AIzaSy..."></textarea>
+            <button type="submit">افزودن همه</button>
+          </form>
+          <p id="bulk-result" class="muted hidden"></p>
+        </details>
+
         <ul id="gemini-list" class="key-list"></ul>
 
         <div class="panel-head compact">

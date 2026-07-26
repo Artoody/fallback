@@ -285,6 +285,29 @@ geminiForm.addEventListener("submit", async (e) => {
   }
 });
 
+// ---------------- افزودن دسته‌ای کلید Gemini ----------------
+const bulkForm = document.getElementById("bulk-form");
+const bulkKeys = document.getElementById("bulk-keys");
+const bulkResult = document.getElementById("bulk-result");
+
+bulkForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  bulkResult.classList.add("hidden");
+  showError(geminiError, "");
+  try {
+    const data = await api("/admin/api/gemini-keys/bulk", {
+      method: "POST",
+      body: JSON.stringify({ text: bulkKeys.value }),
+    });
+    bulkKeys.value = "";
+    bulkResult.textContent = `✅ ${data.addedCount} کلید جدید اضافه شد${data.skippedCount ? ` · ${data.skippedCount} تا تکراری بود و رد شد` : ""}.`;
+    bulkResult.classList.remove("hidden");
+    await refreshAll();
+  } catch (err) {
+    showError(geminiError, err.message);
+  }
+});
+
 geminiList.addEventListener("click", async (e) => {
   const btn = e.target.closest("button[data-gemini-index]");
   if (!btn) return;

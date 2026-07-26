@@ -246,6 +246,44 @@ app.post("/admin/api/gemini-keys", requireAdmin, (req, res) => {
   }
 });
 
+// افزودن دسته‌ای — چند کلید با هم، جدا شده با کاما یا خط جدید (دقیقاً مثل فرمت GEMINI_API_KEYS تو .env)
+app.post("/admin/api/gemini-keys/bulk", requireAdmin, (req, res) => {
+  try {
+    const raw = req.body?.text || "";
+    const candidates = String(raw)
+      .split(/[,\n\r]+/)
+      .map((k) => k.trim().replace(/^["']+|["']+$/g, "").trim())
+      .filter(Boolean);
+
+    if (!candidates.length) {
+      return res.status(400).json({ error: "هیچ کلید معتبری پیدا نشد." });
+    }
+
+    const existing = new Set(store.getGeminiKeys());
+    const added = [];
+    const skipped = [];
+
+    for (const k of candidates) {
+      if (existing.has(k) || added.includes(k)) {
+        skipped.push(k.slice(0, 8) + "…");
+        continue;
+      }
+      store.addGeminiKey(k);
+      keyManager.addKey(k);
+      added.push(k);
+    }
+
+    res.json({
+      ok: true,
+      addedCount: added.length,
+      skippedCount: skipped.length,
+      keys: store.listGeminiKeysMasked(),
+    });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
 app.delete("/admin/api/gemini-keys/:index", requireAdmin, (req, res) => {
   try {
     const index = Number(req.params.index);
