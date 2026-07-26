@@ -233,11 +233,36 @@ export async function callGeminiStream({ keyManager, path, body, query = {}, onC
       if (onStart) onStart(keyObj.index);
       keyManager.markSuccess(keyObj);
 
+      let sseBuffer = "";
+      let lastUsageMetadata = null;
+
       for await (const chunk of resp.body) {
         onChunk(chunk);
+
+        // موازی با پاس دادن chunk خام به کلاینت، دنبال آخرین usageMetadata تو استریم SSE می‌گردیم
+        // (Gemini معمولاً usageMetadata رو تو آخرین رویداد data: {...} استریم می‌فرسته)
+        try {
+          sseBuffer += chunk.toString("utf8");
+          const lines = sseBuffer.split("\n");
+          sseBuffer = lines.pop() ?? ""; // خط ناقص آخر رو نگه دار برای chunk بعدی
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed.startsWith("data:")) continue;
+            const jsonPart = trimmed.slice(5).trim();
+            if (!jsonPart || jsonPart === "[DONE]") continue;
+            try {
+              const parsed = JSON.parse(jsonPart);
+              if (parsed?.usageMetadata) lastUsageMetadata = parsed.usageMetadata;
+            } catch {
+              // خط ناقص یا غیر JSON — نادیده بگیر
+            }
+          }
+        } catch {
+          // parse کردن usageMetadata فقط برای آمار مصرفه؛ اگه fail بشه نباید جلوی استریم اصلی رو بگیره
+        }
       }
 
-      return { ok: true, usedKeyIndex: keyObj.index };
+      return { ok: true, usedKeyIndex: keyObj.index, data: { usageMetadata: lastUsageMetadata } };
     } catch (networkErr) {
       clearTimeout(connectTimer);
       lastError = { status: 0, body: networkErr.message, usedKeyIndex: keyObj.index };
