@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>پنل مدیریت Gemini Proxy</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="login-view" class="login-wrap">
+    <form id="login-form" class="login-card">
+      <p class="brand">Gemini Proxy</p>
+      <h1>ورود ادمین</h1>
+      <p class="muted">برای مدیریت کلیدها و دانش‌آموزها وارد شو.</p>
+      <label for="admin-password">رمز ادمین</label>
+      <input id="admin-password" type="password" autocomplete="current-password" required />
+      <button type="submit">ورود</button>
+      <p id="login-error" class="error hidden"></p>
+    </form>
+  </div>
+
+  <div id="app-view" class="hidden">
+    <header class="topbar">
+      <div>
+        <p class="brand">Gemini Proxy</p>
+        <h1>پنل مدیریت</h1>
+      </div>
+      <button id="logout-btn" class="ghost" type="button">خروج</button>
+    </header>
+
+    <section class="stats" id="overview-stats">
+      <article>
+        <span>کلیدهای Gemini</span>
+        <strong id="stat-gemini">0</strong>
+      </article>
+      <article>
+        <span>دانش‌آموزان</span>
+        <strong id="stat-clients">0</strong>
+      </article>
+      <article>
+        <span>کل درخواست‌ها</span>
+        <strong id="stat-requests">0</strong>
+      </article>
+    </section>
+
+    <main class="grid">
+      <section class="panel">
+        <div class="panel-head">
+          <h2>کلیدهای دانش‌آموز (Proxy)</h2>
+          <p>هر دانش‌آموز یک کلید جدا می‌گیرد؛ همه به استخر مشترک Gemini وصل می‌شوند.</p>
+        </div>
+
+        <form id="client-form" class="row-form">
+          <input id="client-name" type="text" placeholder="نام دانش‌آموز" required />
+          <button type="submit">ساخت کلید جدید</button>
+        </form>
+        <p id="client-error" class="error hidden"></p>
+        <div id="new-key-banner" class="banner hidden">
+          <div>
+            <strong>کلید ساخته شد — یک‌بار کپی کن:</strong>
+            <code id="new-key-value"></code>
+          </div>
+          <button type="button" id="copy-new-key">کپی</button>
+        </div>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>نام</th>
+                <th>کلید</th>
+                <th>درخواست</th>
+                <th>موفق</th>
+                <th>خطا</th>
+                <th>توکن</th>
+                <th>آخرین استفاده</th>
+                <th>وضعیت</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="clients-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <h2>استخر کلیدهای Gemini</h2>
+          <p>این کلیدها بین همه دانش‌آموزها مشترک است و auto-switch روی همین‌ها کار می‌کند.</p>
+        </div>
+
+        <form id="gemini-form" class="row-form">
+          <input id="gemini-key" type="text" placeholder="کلید جدید Gemini را بچسبان" required />
+          <button type="submit">افزودن کلید</button>
+        </form>
+        <p id="gemini-error" class="error hidden"></p>
+
+        <ul id="gemini-list" class="key-list"></ul>
+
+        <div class="panel-head compact">
+          <h3>وضعیت زنده کلیدها</h3>
+        </div>
+        <ul id="gemini-status" class="key-list"></ul>
+      </section>
+    </main>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

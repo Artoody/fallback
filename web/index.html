@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Sensor Simulator</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div class="card">
+
+<h1>Sensor Data Simulator</h1>
+
+<label>Temperature</label>
+<input id="temp" type="number" value="28">
+
+<label>Humidity</label>
+<input id="hum" type="number" value="54">
+
+<label>Pressure</label>
+<input id="pres" type="number" value="1012">
+
+<label>Altitude</label>
+<input id="alt" type="number" value="120">
+
+<label>Battery</label>
+<input id="battery" type="number" value="92">
+
+<label>Status</label>
+
+<select id="status">
+<option>normal</option>
+<option>warning</option>
+<option>critical</option>
+</select>
+
+<button onclick="randomData()">
+Generate Random Data
+</button>
+
+<button onclick="sendData()">
+Send To AI
+</button>
+
+<pre id="result"></pre>
+
+</div>
+
+<script src="script.js"></script>
+
+</body>
+</html>
