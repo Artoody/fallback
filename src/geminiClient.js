@@ -63,6 +63,29 @@ function makeTimeoutSignal(ms) {
 }
 
 /** لیست مدل‌های موجود Gemini — GET /v1beta/models (برای پر کردن dropdown پنل تست) */
+/** تست سریع یه کلید مشخص (بدون استفاده از keyManager rotation) — سبک، بدون هزینه‌ی generation */
+export async function testSingleGeminiKey(key) {
+  const start = Date.now();
+  const url = buildUrl("/v1beta/models", key, { pageSize: 1 });
+  try {
+    const resp = await fetch(url, {
+      method: "GET",
+      signal: makeTimeoutSignal(10000),
+    });
+    const ms = Date.now() - start;
+    if (resp.ok) {
+      return { ok: true, ms };
+    }
+    const errText = await resp.text();
+    if (isInvalidApiKeyError(resp.status, errText)) {
+      return { ok: false, ms, error: "کلید نامعتبر است.", status: resp.status };
+    }
+    return { ok: false, ms, error: errText.slice(0, 200), status: resp.status };
+  } catch (err) {
+    return { ok: false, ms: Date.now() - start, error: err.message };
+  }
+}
+
 export async function listGeminiModels({ keyManager }) {
   const orderedKeys = keyManager.getAvailableOrder();
   let lastError = null;

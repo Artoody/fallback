@@ -8,7 +8,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import KeyManager from "./keyManager.js";
 import Store from "./store.js";
-import { callGeminiNonStream, callGeminiStream, listGeminiModels } from "./geminiClient.js";
+import { callGeminiNonStream, callGeminiStream, listGeminiModels, testSingleGeminiKey } from "./geminiClient.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -295,6 +295,30 @@ app.delete("/admin/api/gemini-keys/:index", requireAdmin, (req, res) => {
     res.json({ ok: true, keys: store.listGeminiKeysMasked() });
   } catch (err) {
     res.status(400).json({ error: err.message });
+  }
+});
+
+// تست سریع یه کلید مشخص Gemini — کنار همون کلید تو پنل، بدون نیاز به نوشتن پرامپت
+app.post("/admin/api/gemini-keys/:index/test", requireAdmin, async (req, res) => {
+  try {
+    const index = Number(req.params.index);
+    const keys = store.getGeminiKeys();
+    if (index < 0 || index >= keys.length) {
+      return res.status(400).json({ error: "ایندکس نامعتبر است." });
+    }
+    const result = await testSingleGeminiKey(keys[index]);
+    if (!result.ok) {
+      logError({
+        type: "key_test",
+        message: result.error,
+        clientName: "ادمین (تست کلید)",
+        status: result.status,
+        keyIndex: index,
+      });
+    }
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 

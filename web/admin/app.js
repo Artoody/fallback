@@ -130,12 +130,16 @@ function renderGeminiKeys(keys, statusList) {
     geminiList.innerHTML = keys
       .map(
         (k) => `
-      <li>
+      <li data-gemini-index="${k.index}">
         <div>
           <code>${escapeHtml(k.preview)}</code>
           <div class="meta">#${k.index + 1} · طول ${k.length}</div>
         </div>
-        <button class="danger small" data-gemini-index="${k.index}" type="button">حذف</button>
+        <div class="key-actions">
+          <span class="test-status" data-test-status></span>
+          <button class="ghost small" data-action="test-key" type="button">تست</button>
+          <button class="danger small" data-action="delete-key" type="button">حذف</button>
+        </div>
       </li>`
       )
       .join("");
@@ -309,15 +313,52 @@ bulkForm.addEventListener("submit", async (e) => {
 });
 
 geminiList.addEventListener("click", async (e) => {
-  const btn = e.target.closest("button[data-gemini-index]");
+  const btn = e.target.closest("button[data-action]");
   if (!btn) return;
-  const index = btn.dataset.geminiIndex;
-  if (!confirm("این کلید Gemini حذف شود؟")) return;
-  try {
-    await api(`/admin/api/gemini-keys/${index}`, { method: "DELETE" });
-    await refreshAll();
-  } catch (err) {
-    showError(geminiError, err.message);
+  const li = btn.closest("li[data-gemini-index]");
+  if (!li) return;
+  const index = li.dataset.geminiIndex;
+  const action = btn.dataset.action;
+  const statusEl = li.querySelector("[data-test-status]");
+
+  if (action === "delete-key") {
+    if (!confirm("این کلید Gemini حذف شود؟")) return;
+    try {
+      await api(`/admin/api/gemini-keys/${index}`, { method: "DELETE" });
+      await refreshAll();
+    } catch (err) {
+      showError(geminiError, err.message);
+    }
+    return;
+  }
+
+  if (action === "test-key") {
+    btn.disabled = true;
+    btn.textContent = "...";
+    if (statusEl) {
+      statusEl.textContent = "";
+      statusEl.className = "test-status";
+    }
+    try {
+      const result = await api(`/admin/api/gemini-keys/${index}/test`, { method: "POST" });
+      if (statusEl) {
+        if (result.ok) {
+          statusEl.textContent = `✅ سالم (${result.ms}ms)`;
+          statusEl.className = "test-status ok";
+        } else {
+          statusEl.textContent = `❌ ${result.error || "خطا"}`;
+          statusEl.className = "test-status fail";
+        }
+      }
+    } catch (err) {
+      if (statusEl) {
+        statusEl.textContent = `❌ ${err.message}`;
+        statusEl.className = "test-status fail";
+      }
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "تست";
+    }
   }
 });
 

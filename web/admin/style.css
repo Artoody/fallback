@@ -334,6 +334,25 @@ td code {
   font-size: 0.82rem;
 }
 
+.key-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.test-status {
+  font-size: 0.78rem;
+  white-space: nowrap;
+}
+
+.test-status.ok {
+  color: var(--ok);
+}
+
+.test-status.fail {
+  color: var(--danger);
+}
+
 /* ---------------- Bulk key import ---------------- */
 .bulk-import {
   margin: 0 0 14px;
