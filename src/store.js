@@ -42,6 +42,9 @@ function saveRaw(data) {
   fs.writeFileSync(STORE_PATH, JSON.stringify(data, null, 2), "utf8");
 }
 
+// نوشتن روی دیسک با تاخیر و دسته‌ای (debounce) — به‌جای نوشتن روی هر درخواست تکی
+const PERSIST_DEBOUNCE_MS = parseInt(process.env.STORE_PERSIST_DEBOUNCE_MS || "2000", 10);
+
 function generateKey() {
   return crypto.randomBytes(32).toString("hex");
 }
@@ -61,9 +64,34 @@ function newClientStats() {
 class Store {
   constructor() {
     this.data = loadRaw();
+    this._persistTimer = null;
   }
 
+  /** نوشتن فوری و همزمان روی دیسک (برای تغییرات مهم مثل ساخت/حذف کلاینت) */
   persist() {
+    if (this._persistTimer) {
+      clearTimeout(this._persistTimer);
+      this._persistTimer = null;
+    }
+    saveRaw(this.data);
+  }
+
+  /** نوشتن با تاخیر (برای آمار پرتکرار مثل recordUsage) — چند رخداد را در یک نوشتن دیسک جمع می‌کند */
+  persistDebounced() {
+    if (this._persistTimer) return;
+    this._persistTimer = setTimeout(() => {
+      this._persistTimer = null;
+      saveRaw(this.data);
+    }, PERSIST_DEBOUNCE_MS);
+    if (typeof this._persistTimer.unref === "function") this._persistTimer.unref();
+  }
+
+  /** فلاش اجباری قبل از خاموش شدن پروسه */
+  flush() {
+    if (this._persistTimer) {
+      clearTimeout(this._persistTimer);
+      this._persistTimer = null;
+    }
     saveRaw(this.data);
   }
 
@@ -195,7 +223,7 @@ class Store {
       client.stats.candidatesTokens += Number(usageMetadata.candidatesTokenCount || 0);
       client.stats.totalTokens += Number(usageMetadata.totalTokenCount || 0);
     }
-    this.persist();
+    this.persistDebounced();
   }
 
   /** seed اولیه از env اگر store خالی باشد */

@@ -62,6 +62,45 @@ function makeTimeoutSignal(ms) {
   return ctrl.signal;
 }
 
+/** لیست مدل‌های موجود Gemini — GET /v1beta/models (برای پر کردن dropdown پنل تست) */
+export async function listGeminiModels({ keyManager }) {
+  const orderedKeys = keyManager.getAvailableOrder();
+  let lastError = null;
+
+  for (const keyObj of orderedKeys) {
+    const url = buildUrl("/v1beta/models", keyObj.key, { pageSize: 100 });
+    try {
+      const resp = await fetch(url, {
+        method: "GET",
+        signal: makeTimeoutSignal(FETCH_TIMEOUT_MS),
+      });
+      if (resp.ok) {
+        const data = await resp.json();
+        keyManager.markSuccess(keyObj);
+        return { ok: true, status: resp.status, data };
+      }
+      const errText = await resp.text();
+      lastError = { status: resp.status, body: errText };
+      if (isInvalidApiKeyError(resp.status, errText)) {
+        keyManager.markInvalid(keyObj);
+        continue;
+      }
+      keyManager.markRateLimited(keyObj);
+      continue;
+    } catch (networkErr) {
+      lastError = { status: 0, body: networkErr.message };
+      keyManager.markRateLimited(keyObj);
+      continue;
+    }
+  }
+
+  return {
+    ok: false,
+    status: lastError?.status || 502,
+    error: lastError?.body || "لیست مدل‌ها قابل دریافت نبود.",
+  };
+}
+
 export async function callGeminiNonStream({ keyManager, path, body, query = {} }) {
   const orderedKeys = keyManager.getAvailableOrder();
   let lastError = null;

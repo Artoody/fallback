@@ -174,6 +174,11 @@ async function enterApp() {
   loginView.classList.add("hidden");
   appView.classList.remove("hidden");
   await refreshAll();
+  loadModelsIntoDropdown();
+  loadErrors();
+  setInterval(() => {
+    if (!appView.classList.contains("hidden")) loadErrors();
+  }, 15000);
 }
 
 loginForm.addEventListener("submit", async (e) => {
@@ -291,6 +296,111 @@ geminiList.addEventListener("click", async (e) => {
   } catch (err) {
     showError(geminiError, err.message);
   }
+});
+
+// ---------------- Test API panel ----------------
+const testForm = document.getElementById("test-form");
+const testModel = document.getElementById("test-model");
+const testPrompt = document.getElementById("test-prompt");
+const testSubmit = document.getElementById("test-submit");
+const testError = document.getElementById("test-error");
+const testResult = document.getElementById("test-result");
+const testUsedKey = document.getElementById("test-used-key");
+const testTokens = document.getElementById("test-tokens");
+const testOutput = document.getElementById("test-output");
+
+async function loadModelsIntoDropdown() {
+  try {
+    const data = await api("/admin/api/models");
+    const names = (data.models || [])
+      .map((m) => m.name?.replace(/^models\//, ""))
+      .filter(Boolean)
+      // فقط مدل‌هایی که generateContent رو ساپورت می‌کنن
+      .filter((_, i) => true);
+    if (!names.length) return; // اگه لیست خالی بود، گزینه‌های پیش‌فرض توی HTML می‌مونن
+    testModel.innerHTML = names.map((n) => `<option value="${escapeHtml(n)}">${escapeHtml(n)}</option>`).join("");
+  } catch {
+    // اگه گرفتن لیست مدل‌ها fail شد، مشکلی نیست — گزینه‌های پیش‌فرض HTML همچنان کار می‌کنن
+  }
+}
+
+testForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  showError(testError, "");
+  testResult.classList.add("hidden");
+  testSubmit.disabled = true;
+  testSubmit.textContent = "در حال ارسال...";
+
+  try {
+    const data = await api("/admin/api/test-prompt", {
+      method: "POST",
+      body: JSON.stringify({ model: testModel.value, prompt: testPrompt.value }),
+    });
+
+    testUsedKey.textContent = `کلید #${data.usedKeyIndex + 1} پاسخ داد`;
+    const usage = data.usageMetadata;
+    testTokens.textContent = usage
+      ? `توکن: ورودی ${formatNumber(usage.promptTokenCount)} · خروجی ${formatNumber(usage.candidatesTokenCount)} · مجموع ${formatNumber(usage.totalTokenCount)}`
+      : "";
+    testOutput.textContent = data.text || "(پاسخ خالی بود)";
+    testResult.classList.remove("hidden");
+  } catch (err) {
+    showError(testError, err.message);
+  } finally {
+    testSubmit.disabled = false;
+    testSubmit.textContent = "ارسال درخواست";
+  }
+});
+
+// ---------------- Error log panel ----------------
+const errorList = document.getElementById("error-list");
+const clearErrorsBtn = document.getElementById("clear-errors");
+
+function renderErrors(errors) {
+  if (!errors.length) {
+    errorList.innerHTML = `<li class="muted">تا الان خطایی ثبت نشده. 🎉</li>`;
+    return;
+  }
+  errorList.innerHTML = errors
+    .map((e) => {
+      const typeLabel =
+        { stream: "استریم", "non-stream": "درخواست", test_prompt: "تست پنل", server_exception: "خطای سرور" }[
+          e.type
+        ] || e.type;
+      const meta = [
+        e.clientName ? `کلاینت: ${escapeHtml(e.clientName)}` : null,
+        e.model ? `مدل: ${escapeHtml(e.model)}` : null,
+        e.status ? `کد: ${e.status}` : null,
+        e.keyIndex !== null && e.keyIndex !== undefined ? `کلید #${e.keyIndex + 1}` : null,
+      ]
+        .filter(Boolean)
+        .join(" · ");
+      return `
+      <li>
+        <div class="error-item-head">
+          <span class="badge blocked">${escapeHtml(typeLabel)}</span>
+          <span class="meta">${formatDate(e.time)}</span>
+        </div>
+        <div class="error-item-msg">${escapeHtml(e.message)}</div>
+        ${meta ? `<div class="meta">${meta}</div>` : ""}
+      </li>`;
+    })
+    .join("");
+}
+
+async function loadErrors() {
+  try {
+    const data = await api("/admin/api/errors");
+    renderErrors(data.errors || []);
+  } catch {
+    // اگه گرفتن لاگ خطا fail شد، بی‌سروصدا رد شو
+  }
+}
+
+clearErrorsBtn.addEventListener("click", async () => {
+  if (!confirm("لاگ خطاها پاک بشه؟")) return;
+  await api("/admin/api/errors", { method: "DELETE" });
+  await loadErrors();
 });
 
 (async function boot() {

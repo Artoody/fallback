@@ -105,6 +105,46 @@
         </div>
         <ul id="gemini-status" class="key-list"></ul>
       </section>
+
+      <section class="panel test-panel">
+        <div class="panel-head">
+          <h2>🧪 تست API</h2>
+          <p>یه پرامپت واقعی از طریق همین پروکسی و استخر کلیدها به Gemini بفرست و جواب زنده رو ببین.</p>
+        </div>
+
+        <form id="test-form" class="test-form">
+          <label for="test-model">مدل</label>
+          <select id="test-model">
+            <option value="gemini-2.0-flash">gemini-2.0-flash</option>
+            <option value="gemini-1.5-flash">gemini-1.5-flash</option>
+            <option value="gemini-1.5-pro">gemini-1.5-pro</option>
+          </select>
+
+          <label for="test-prompt">پرامپت</label>
+          <textarea id="test-prompt" rows="3" placeholder="مثلاً: یه شعر کوتاه درباره‌ی بهار بنویس" required></textarea>
+
+          <button type="submit" id="test-submit">ارسال درخواست</button>
+        </form>
+
+        <p id="test-error" class="error hidden"></p>
+
+        <div id="test-result" class="test-result hidden">
+          <div class="test-meta">
+            <span id="test-used-key" class="badge on"></span>
+            <span id="test-tokens" class="meta"></span>
+          </div>
+          <div id="test-output" class="test-output"></div>
+        </div>
+      </section>
+
+      <section class="panel error-panel">
+        <div class="panel-head">
+          <h2>🚨 لاگ خطاها</h2>
+          <p>آخرین خطاهایی که تو فراخوانی‌های Gemini یا خود سرور رخ داده (حداکثر ۱۰۰ مورد آخر).</p>
+          <button id="clear-errors" class="ghost small" type="button">پاک کردن لاگ</button>
+        </div>
+        <ul id="error-list" class="error-list"></ul>
+      </section>
     </main>
   </div>
 
