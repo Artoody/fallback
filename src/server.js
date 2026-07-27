@@ -454,6 +454,9 @@ app.post("/v1/chat/completions", requireClientAuth, async (req, res) => {
 
   let attempts = 0;
   const maxAttempts = keys.length;
+  let streamStarted = false;
+  let lastErrorStatus = null;
+  let lastErrorData = null;
 
   while (attempts < maxAttempts) {
     // انتخاب نوبتی کلید و صرف‌نظر از کلیدهای در حال استراحت (Cooldown)
@@ -476,43 +479,27 @@ app.post("/v1/chat/completions", requireClientAuth, async (req, res) => {
 
         const errStr = typeof errData === "string" ? errData : JSON.stringify(errData);
 
-        const isRetryable =
-          response.status === 429 ||
-          response.status === 401 ||
-          response.status === 403 ||
-          response.status === 400 ||
-          response.status === 404 ||
-          errStr.includes("RESOURCE_EXHAUSTED") ||
-          errStr.includes("Quota exceeded") ||
-          errStr.includes("Invalid Auth key") ||
-          errStr.includes("no longer available");
+        // هر پاسخ غیر از 200 (اعم از 400، 401، 403، 404، 429، 500، 502، 503، 504 و ...)
+        // باعث می‌شود بلافاصله سراغ کلید بعدی برویم. دیگر هیچ status code‌ای
+        // این کلید را مستقیماً به کاربر برنمی‌گرداند مگر اینکه همه‌ی کلیدها تمام شده باشند.
+        console.warn(`[openai] Key #${keyIndex} failed (${response.status}). Placing on 60s cooldown and rotating...`);
+        keyCooldowns.set(keyIndex, Date.now() + 60000);
 
-        if (isRetryable) {
-          console.warn(`[openai] Key #${keyIndex} failed (${response.status}). Placing on 60s cooldown and rotating...`);
-          // این کلید را ۶۰ ثانیه در لیست استراحت بگذار تا درخواست‌های بعدی سراغش نیایند
-          keyCooldowns.set(keyIndex, Date.now() + 60000);
+        logError({
+          type: "key_rotation",
+          message: `Key #${keyIndex} failed (${response.status}): ${errStr}. Placed on 60s cooldown.`,
+          clientName: req.client?.name,
+          model: req.body?.model,
+          status: response.status,
+          keyIndex
+        });
 
-          logError({
-            type: "key_rotation",
-            message: `Key #${keyIndex} failed (${response.status}): ${errStr}. Placed on 60s cooldown.`,
-            clientName: req.client?.name,
-            model: req.body?.model,
-            status: response.status,
-            keyIndex
-          });
-          attempts++;
-          continue; // رفتن به کلید بعدی
-        } else {
-          logError({
-            type: "openai_error",
-            message: errStr,
-            clientName: req.client?.name,
-            model: req.body?.model,
-            status: response.status,
-            keyIndex
-          });
-          return res.status(response.status).json(errData);
-        }
+        // آخرین خطا را نگه می‌داریم تا اگر همه‌ی کلیدها تمام شدند، همین را برگردانیم
+        lastErrorStatus = response.status;
+        lastErrorData = errData;
+
+        attempts++;
+        continue; // رفتن به کلید بعدی، بدون هیچ استثنایی
       }
 
       // اگر کلید موفق شد، کول‌داون آن را پاک کن
@@ -525,14 +512,31 @@ app.post("/v1/chat/completions", requireClientAuth, async (req, res) => {
         res.setHeader("Cache-Control", "no-cache, no-transform");
         res.setHeader("Connection", "keep-alive");
         if (typeof res.flushHeaders === "function") res.flushHeaders();
+        streamStarted = true;
 
-        const reader = response.body.getReader();
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          res.write(value);
+        // این بخش جدا از try بیرونی هندل می‌شود: هدرها همین الان ارسال شدند،
+        // پس اگر استریم وسط راه قطع شود دیگر نمی‌توان کلید را عوض کرد.
+        // فقط باید پاسخ را تمیز به پایان برسانیم تا کاربر هنگ نکند.
+        try {
+          const reader = response.body.getReader();
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            res.write(value);
+          }
+        } catch (streamErr) {
+          console.error(`[openai] Stream broke mid-response on key #${keyIndex}:`, streamErr.message);
+          logError({
+            type: "stream_broken",
+            message: streamErr.message,
+            clientName: req.client?.name,
+            model: req.body?.model,
+            keyIndex,
+          });
+        } finally {
+          if (!res.writableEnded) res.end();
         }
-        res.end();
+
         trackResult(req, { ok: true, usedKeyIndex: keyIndex }, { type: "openai_stream", model: req.body?.model });
         return;
       }
@@ -544,7 +548,18 @@ app.post("/v1/chat/completions", requireClientAuth, async (req, res) => {
 
     } catch (err) {
       console.error(`[openai] Network error on key #${keyIndex}:`, err.message);
+
+      // اگر هدرها/استریم قبلاً شروع شده باشد، دیگر امکان تعویض کلید نیست
+      // (چون جواب برای کاربر از قبل باز شده). فقط پاسخ را تمیز می‌بندیم
+      // تا کاربر منتظر بی‌نهایت نماند.
+      if (streamStarted || res.headersSent) {
+        if (!res.writableEnded) res.end();
+        return;
+      }
+
       keyCooldowns.set(keyIndex, Date.now() + 30000);
+      lastErrorStatus = 502;
+      lastErrorData = { message: `Network error: ${err.message}`, keyIndex };
       attempts++;
     }
   }
@@ -554,13 +569,14 @@ app.post("/v1/chat/completions", requireClientAuth, async (req, res) => {
     message: "تمام کلیدهای Gemini در حال استراحت (Cooldown) یا اتمام سهمیه هستند.",
     clientName: req.client?.name,
     model: req.body?.model,
-    status: 429
+    status: lastErrorStatus || 429
   });
 
-  return res.status(429).json({
+  return res.status(lastErrorStatus || 429).json({
     error: {
-      message: "تمام کلیدهای Gemini در حال استراحت (Cooldown) یا اتمام سهمیه (Quota) هستند. لطفاً ۱ دقیقه دیگر امتحان کنید.",
-      allKeysExhausted: true
+      message: "تمام کلیدهای Gemini امتحان شدند و هیچ‌کدام پاسخ موفق ندادند. لطفاً ۱ دقیقه دیگر امتحان کنید.",
+      allKeysExhausted: true,
+      lastError: lastErrorData || null
     }
   });
 });
