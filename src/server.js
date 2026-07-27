@@ -437,7 +437,6 @@ app.post("/v1/chat/completions", requireClientAuth, async (req, res) => {
 
   while (attempts < maxAttempts) {
     const keyIndex = attempts % keys.length;
-    // پاک‌سازی فاصله‌ها و کوتیشن‌های اضافه دور کلید
     const currentGeminiKey = String(keys[keyIndex] || "").trim().replace(/^["']+|["']+$/g, "");
 
     try {
@@ -456,8 +455,17 @@ app.post("/v1/chat/completions", requireClientAuth, async (req, res) => {
 
         const errStr = typeof errData === "string" ? errData : JSON.stringify(errData);
         
-        // اگر کلید ۴۲۹ (سقف سهمیه) یا ۴۰۱/۴۰۳ (کلید سوخته/نامعتبر) داد، به کلید بعدی بچرخ
-        if (response.status === 429 || response.status === 401 || response.status === 403 || errStr.includes("RESOURCE_EXHAUSTED") || errStr.includes("Quota exceeded")) {
+        // اگر ۴۲۹ (سقف سهمیه)، ۴۰۱/۴۰۳ (کلید سوخته) یا ۴۰۰ (Invalid Auth key برای این مدل) داد، به کلید بعدی بچرخ
+        const isRetryable =
+          response.status === 429 ||
+          response.status === 401 ||
+          response.status === 403 ||
+          response.status === 400 ||
+          errStr.includes("RESOURCE_EXHAUSTED") ||
+          errStr.includes("Quota exceeded") ||
+          errStr.includes("Invalid Auth key");
+
+        if (isRetryable) {
           console.warn(`[openai] Key #${keyIndex} failed (${response.status}). Rotating to next key...`);
           logError({
             type: "key_rotation",
@@ -501,7 +509,7 @@ app.post("/v1/chat/completions", requireClientAuth, async (req, res) => {
         return;
       }
 
-      // پاسخ موفق - عادی
+      // پاسخ موفق - معمولی
       const data = await response.json();
       trackResult(req, { ok: true, data, usedKeyIndex: keyIndex }, { type: "openai_non_stream", model: req.body?.model });
       return res.status(200).json(data);
@@ -514,7 +522,7 @@ app.post("/v1/chat/completions", requireClientAuth, async (req, res) => {
 
   logError({
     type: "openai_all_exhausted",
-    message: "تمام کلیدهای Gemini نامعتبر هستند یا به سقف سهمیه رسیده‌اند.",
+    message: "تمام کلیدهای Gemini برای این مدل نامعتبر هستند یا به سقف سهمیه رسیده‌اند.",
     clientName: req.client?.name,
     model: req.body?.model,
     status: 429
@@ -522,7 +530,7 @@ app.post("/v1/chat/completions", requireClientAuth, async (req, res) => {
 
   return res.status(429).json({
     error: {
-      message: "تمام کلیدهای Gemini نامعتبر هستند یا به سقف سهمیه (Quota) رسیده‌اند. لطفاً کلیدهای خود را در پنل /admin چک کنید.",
+      message: "تمام کلیدهای Gemini برای این مدل نامعتبر هستند یا به سقف سهمیه (Quota) رسیده‌اند. لطفاً کلیدهای خود را در پنل /admin چک کنید.",
       allKeysExhausted: true
     }
   });
