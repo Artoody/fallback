@@ -440,11 +440,12 @@ app.post("/v1/chat/completions", requireClientAuth, async (req, res) => {
     const currentGeminiKey = keys[keyIndex];
 
     try {
-      const response = await fetch("https://generativelanguage.googleapis.com/v1beta/openai/chat/completions", {
+      // ارسال کلید در ?key= و x-goog-api-key جهت جلوگیری از خطای ۴۰۱ ACCESS_TOKEN_TYPE_UNSUPPORTED
+      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/openai/chat/completions?key=${currentGeminiKey}`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "Authorization": `Bearer ${currentGeminiKey}`
+          "x-goog-api-key": currentGeminiKey
         },
         body: JSON.stringify(req.body)
       });
