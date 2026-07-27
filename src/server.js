@@ -437,10 +437,10 @@ app.post("/v1/chat/completions", requireClientAuth, async (req, res) => {
 
   while (attempts < maxAttempts) {
     const keyIndex = attempts % keys.length;
-    const currentGeminiKey = String(keys[keyIndex] || "").trim();
+    // پاک‌سازی فاصله‌ها و کوتیشن‌های اضافه دور کلید
+    const currentGeminiKey = String(keys[keyIndex] || "").trim().replace(/^["']+|["']+$/g, "");
 
     try {
-      // فرمت استاندارد گوگل برای اندپوینت OpenAI فقط شامل هدر Authorization است
       const response = await fetch("https://generativelanguage.googleapis.com/v1beta/openai/chat/completions", {
         method: "POST",
         headers: {
@@ -455,10 +455,20 @@ app.post("/v1/chat/completions", requireClientAuth, async (req, res) => {
         try { errData = await response.json(); } catch { errData = await response.text(); }
 
         const errStr = typeof errData === "string" ? errData : JSON.stringify(errData);
-        if (response.status === 429 || errStr.includes("RESOURCE_EXHAUSTED") || errStr.includes("Quota exceeded")) {
-          console.warn(`[openai] Key #${keyIndex} hit quota (429). Rotating key...`);
+        
+        // اگر کلید ۴۲۹ (سقف سهمیه) یا ۴۰۱/۴۰۳ (کلید سوخته/نامعتبر) داد، به کلید بعدی بچرخ
+        if (response.status === 429 || response.status === 401 || response.status === 403 || errStr.includes("RESOURCE_EXHAUSTED") || errStr.includes("Quota exceeded")) {
+          console.warn(`[openai] Key #${keyIndex} failed (${response.status}). Rotating to next key...`);
+          logError({
+            type: "key_rotation",
+            message: `Key #${keyIndex} failed (${response.status}): ${errStr}`,
+            clientName: req.client?.name,
+            model: req.body?.model,
+            status: response.status,
+            keyIndex
+          });
           attempts++;
-          continue;
+          continue; // رفتن به کلید بعدی
         } else {
           logError({
             type: "openai_error",
@@ -472,6 +482,7 @@ app.post("/v1/chat/completions", requireClientAuth, async (req, res) => {
         }
       }
 
+      // پاسخ موفق - استریم
       if (isStreaming) {
         res.status(200);
         res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
@@ -490,6 +501,7 @@ app.post("/v1/chat/completions", requireClientAuth, async (req, res) => {
         return;
       }
 
+      // پاسخ موفق - عادی
       const data = await response.json();
       trackResult(req, { ok: true, data, usedKeyIndex: keyIndex }, { type: "openai_non_stream", model: req.body?.model });
       return res.status(200).json(data);
@@ -502,7 +514,7 @@ app.post("/v1/chat/completions", requireClientAuth, async (req, res) => {
 
   logError({
     type: "openai_all_exhausted",
-    message: "تمام کلیدهای Gemini به سقف سهمیه (Quota) رسیده‌اند.",
+    message: "تمام کلیدهای Gemini نامعتبر هستند یا به سقف سهمیه رسیده‌اند.",
     clientName: req.client?.name,
     model: req.body?.model,
     status: 429
@@ -510,7 +522,7 @@ app.post("/v1/chat/completions", requireClientAuth, async (req, res) => {
 
   return res.status(429).json({
     error: {
-      message: "تمام کلیدهای Gemini به سقف سهمیه (Quota) رسیده‌اند. لطفاً بعداً تلاش کنید.",
+      message: "تمام کلیدهای Gemini نامعتبر هستند یا به سقف سهمیه (Quota) رسیده‌اند. لطفاً کلیدهای خود را در پنل /admin چک کنید.",
       allKeysExhausted: true
     }
   });
