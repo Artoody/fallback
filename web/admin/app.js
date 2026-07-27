@@ -180,6 +180,7 @@ async function enterApp() {
   await refreshAll();
   loadModelsIntoDropdown();
   loadErrors();
+  connectLiveLogStream();
   setInterval(() => {
     if (!appView.classList.contains("hidden")) loadErrors();
   }, 15000);

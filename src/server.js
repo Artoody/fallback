@@ -25,7 +25,7 @@ const envGeminiKeys = (process.env.GEMINI_API_KEYS || "")
 const store = new Store();
 store.seedFromEnv({ geminiKeys: envGeminiKeys, proxyApiKey: PROXY_API_KEY });
 
-// اگر در env کلید Gemini باشد، همان منبع حقیقت است (برای Runflare مهم است)
+// اگر در env کلید Gemini باشد، همان منبع حقیقت است
 if (envGeminiKeys.length > 0) {
   store.setGeminiKeys(envGeminiKeys);
 }
@@ -91,12 +91,11 @@ function requireClientAuth(req, res, next) {
   next();
 }
 
-// مقایسه‌ی امن (constant-time) برای جلوگیری از timing attack روی رمز ادمین
+// مقایسه‌ی امن برای جلوگیری از timing attack روی رمز ادمین
 function safeEqual(a, b) {
   const bufA = Buffer.from(String(a || ""));
   const bufB = Buffer.from(String(b || ""));
   if (bufA.length !== bufB.length) {
-    // طول‌های متفاوت را هم با یه مقایسه‌ی بی‌معنی هم‌طول انجام می‌دیم تا زمان‌سنجی لو نده
     crypto.timingSafeEqual(bufA, bufA);
     return false;
   }
@@ -104,11 +103,11 @@ function safeEqual(a, b) {
 }
 
 // ----------------------------------------------------------------
-// Rate limit ساده برای /admin/api/login: هر IP حداکثر 5 تلاش در 15 دقیقه
+// Rate limit برای /admin/api/login
 // ----------------------------------------------------------------
 const LOGIN_WINDOW_MS = 15 * 60 * 1000;
 const LOGIN_MAX_ATTEMPTS = 5;
-const loginAttempts = new Map(); // ip -> { count, resetAt }
+const loginAttempts = new Map();
 
 function loginRateLimiter(req, res, next) {
   const ip = req.ip || req.connection?.remoteAddress || "unknown";
@@ -132,7 +131,6 @@ function loginRateLimiter(req, res, next) {
   next();
 }
 
-// هر ۱۰ دقیقه IP‌های منقضی‌شده رو پاک کن تا Map بی‌نهایت بزرگ نشه
 setInterval(() => {
   const now = Date.now();
   for (const [ip, entry] of loginAttempts.entries()) {
@@ -155,7 +153,7 @@ function requireAdmin(req, res, next) {
 }
 
 // ----------------------------------------------------------------
-// لاگ خطاهای اخیر — در حافظه نگه می‌داریم (آخرین ۱۰۰ تا) تا تو پنل ادمین دیده بشن
+// لاگ خطاهای اخیر
 // ----------------------------------------------------------------
 const MAX_ERROR_LOG = 100;
 const errorLog = [];
@@ -215,7 +213,6 @@ app.post("/admin/api/login", loginRateLimiter, (req, res) => {
   if (!password || !safeEqual(password, ADMIN_PASSWORD)) {
     return res.status(401).json({ error: "رمز اشتباه است." });
   }
-  // ورود موفق بود؛ شمارنده‌ی تلاش‌های این IP رو ریست کن
   if (req._loginEntry) req._loginEntry.count = 0;
   return res.json({ ok: true });
 });
@@ -246,7 +243,6 @@ app.post("/admin/api/gemini-keys", requireAdmin, (req, res) => {
   }
 });
 
-// افزودن دسته‌ای — چند کلید با هم، جدا شده با کاما یا خط جدید (دقیقاً مثل فرمت GEMINI_API_KEYS تو .env)
 app.post("/admin/api/gemini-keys/bulk", requireAdmin, (req, res) => {
   try {
     const raw = req.body?.text || "";
@@ -298,7 +294,6 @@ app.delete("/admin/api/gemini-keys/:index", requireAdmin, (req, res) => {
   }
 });
 
-// تست سریع یه کلید مشخص Gemini — کنار همون کلید تو پنل، بدون نیاز به نوشتن پرامپت
 app.post("/admin/api/gemini-keys/:index/test", requireAdmin, async (req, res) => {
   try {
     const index = Number(req.params.index);
@@ -367,7 +362,6 @@ app.get("/admin/api/gemini-status", requireAdmin, (req, res) => {
   res.json(keyManager.status());
 });
 
-// آخرین خطاهای ثبت‌شده (فراخوانی‌های ناموفق Gemini + خطاهای عمومی سرور)
 app.get("/admin/api/errors", requireAdmin, (req, res) => {
   res.json({ errors: errorLog });
 });
@@ -377,7 +371,6 @@ app.delete("/admin/api/errors", requireAdmin, (req, res) => {
   res.json({ ok: true });
 });
 
-// لیست مدل‌های موجود Gemini (برای پر کردن dropdown پنل تست)
 app.get("/admin/api/models", requireAdmin, async (req, res) => {
   const result = await listGeminiModels({ keyManager });
   if (!result.ok) {
@@ -386,7 +379,6 @@ app.get("/admin/api/models", requireAdmin, async (req, res) => {
   res.json({ models: result.data?.models || [] });
 });
 
-// دکمه‌ی "Test API" پنل ادمین: یه پرامپت واقعی از طریق همین پروکسی به Gemini می‌فرسته
 app.post("/admin/api/test-prompt", requireAdmin, async (req, res) => {
   try {
     const { model, prompt } = req.body || {};
@@ -430,7 +422,76 @@ app.post("/admin/api/test-prompt", requireAdmin, async (req, res) => {
 });
 
 // ----------------------------------------------------------------
-// Gemini proxy (همون structure گوگل) — همه دانش‌آموزها به یک استخر کلید وصلن
+// NEW ROUTE: OpenAI-compatible endpoint (/v1/chat/completions) for VS Code / Cline
+// ----------------------------------------------------------------
+app.post("/v1/chat/completions", requireClientAuth, async (req, res) => {
+  const isStreaming = req.body.stream === true;
+  const pathUrl = "/v1beta/openai/chat/completions";
+
+  if (isStreaming) {
+    let streamStarted = false;
+
+    const result = await callGeminiStream({
+      keyManager,
+      path: pathUrl,
+      body: req.body,
+      onStart: (keyIndex) => {
+        streamStarted = true;
+        res.status(200);
+        res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+        res.setHeader("Cache-Control", "no-cache, no-transform");
+        res.setHeader("Connection", "keep-alive");
+        if (typeof res.flushHeaders === "function") res.flushHeaders();
+        console.log(`[openai-stream] client=${req.client.name} key#${keyIndex}`);
+      },
+      onChunk: (chunk) => {
+        res.write(chunk);
+        if (typeof res.flush === "function") res.flush();
+      },
+    });
+
+    trackResult(req, result, { type: "openai_stream", model: req.body.model });
+
+    if (!result.ok) {
+      if (!streamStarted && !res.headersSent) {
+        return res.status(result.status || 429).json({
+          error: {
+            message: result.error,
+            allKeysExhausted: result.allKeysExhausted || false,
+          },
+        });
+      }
+      res.end();
+      return;
+    }
+
+    res.end();
+    return;
+  }
+
+  // Non-streaming
+  const result = await callGeminiNonStream({
+    keyManager,
+    path: pathUrl,
+    body: req.body,
+  });
+
+  trackResult(req, result, { type: "openai_non_stream", model: req.body.model });
+
+  if (!result.ok) {
+    return res.status(result.status || 429).json({
+      error: {
+        message: result.error,
+        allKeysExhausted: result.allKeysExhausted || false,
+      },
+    });
+  }
+
+  return res.status(result.status).json(result.data);
+});
+
+// ----------------------------------------------------------------
+// Gemini proxy (همون structure گوگل)
 // ----------------------------------------------------------------
 app.post("/v1beta/models/:modelAndMethod", requireClientAuth, async (req, res) => {
   const { modelAndMethod } = req.params;
@@ -456,8 +517,6 @@ app.post("/v1beta/models/:modelAndMethod", requireClientAuth, async (req, res) =
       query,
       onStart: (keyIndex) => {
         streamStarted = true;
-        // فقط وقتی استریم گوگل واقعاً شروع شد SSE می‌فرستیم
-        // اگر زودتر بفرستیم، Cline روی "thinking" گیر می‌کند
         res.status(200);
         res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
         res.setHeader("Cache-Control", "no-cache, no-transform");
@@ -516,8 +575,6 @@ app.get("/debug/keys-status", requireClientAuth, (req, res) => {
   res.json(keyManager.status());
 });
 
-// هندلر عمومی خطا — هر throw/exception پیش‌بینی‌نشده رو می‌گیره، لاگ می‌کنه و 500 برمی‌گردونه
-// (باید آخرین app.use باشه، بعد از همه‌ی route ها)
 app.use((err, req, res, next) => {
   console.error("[gemini-fallback-proxy] خطای پیش‌بینی‌نشده:", err);
   logError({
@@ -535,7 +592,6 @@ app.listen(PORT, "0.0.0.0", () => {
   console.log(`[gemini-fallback-proxy] پنل ادمین: http://0.0.0.0:${PORT}/admin/`);
 });
 
-// قبل از خاموش شدن (redeploy/SIGTERM)، هر نوشتن دیسک معلق رو فوراً flush کن تا آمار گم نشه
 function gracefulShutdown(signal) {
   console.log(`[gemini-fallback-proxy] دریافت ${signal}؛ در حال flush کردن store...`);
   try {
