@@ -180,10 +180,168 @@ async function enterApp() {
   await refreshAll();
   loadModelsIntoDropdown();
   loadErrors();
+  loadLiveHistory();
   connectLiveLogStream();
   setInterval(() => {
     if (!appView.classList.contains("hidden")) loadErrors();
   }, 15000);
+}
+
+// ---------------- Live activity feed ----------------
+const liveFeed = document.getElementById("live-feed");
+const liveConnStatus = document.getElementById("live-conn-status");
+const clearLiveBtn = document.getElementById("clear-live");
+let liveAbort = null;
+let liveSeenIds = new Set();
+
+const LIVE_ICONS = {
+  request: "📨",
+  try: "🔄",
+  success: "✅",
+  fail: "❌",
+  cooldown: "⏳",
+  exhausted: "🛑",
+  connected: "🔌",
+  info: "ℹ️",
+};
+
+function setLiveStatus(online) {
+  if (!liveConnStatus) return;
+  liveConnStatus.classList.toggle("online", online);
+  liveConnStatus.classList.toggle("offline", !online);
+  liveConnStatus.textContent = online ? "زنده" : "آفلاین";
+}
+
+function formatLiveTime(iso) {
+  try {
+    return new Date(iso).toLocaleTimeString("fa-IR", {
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    });
+  } catch {
+    return "";
+  }
+}
+
+function prependLiveEvent(ev) {
+  if (!liveFeed || !ev) return;
+  if (ev.id && liveSeenIds.has(ev.id)) return;
+  if (ev.id) liveSeenIds.add(ev.id);
+  if (liveSeenIds.size > 300) {
+    liveSeenIds = new Set([...liveSeenIds].slice(-150));
+  }
+
+  const empty = liveFeed.querySelector(".live-empty");
+  if (empty) empty.remove();
+
+  const type = ev.type || "info";
+  const icon = LIVE_ICONS[type] || "•";
+  const metaParts = [];
+  if (ev.clientName) metaParts.push(`کلاینت: ${escapeHtml(ev.clientName)}`);
+  if (ev.model) metaParts.push(`مدل: <code>${escapeHtml(ev.model)}</code>`);
+  if (ev.keyIndex !== undefined && ev.keyIndex !== null)
+    metaParts.push(`کلید #${Number(ev.keyIndex) + 1}`);
+  if (ev.attempt && ev.totalKeys)
+    metaParts.push(`تلاش ${ev.attempt}/${ev.totalKeys}`);
+  if (ev.status) metaParts.push(`کد ${ev.status}`);
+  if (ev.cooldownMs) metaParts.push(`${Math.round(ev.cooldownMs / 1000)}s cooldown`);
+
+  const el = document.createElement("div");
+  el.className = `live-item type-${type}`;
+  el.innerHTML = `
+    <div class="live-icon">${icon}</div>
+    <div class="live-body">
+      <p class="live-title">${escapeHtml(ev.message || type)}</p>
+      ${metaParts.length ? `<div class="live-meta">${metaParts.join(" · ")}</div>` : ""}
+    </div>
+    <div class="live-time">${formatLiveTime(ev.time)}</div>
+    ${ev.detail ? `<div class="live-detail">${escapeHtml(ev.detail)}</div>` : ""}
+  `;
+  liveFeed.prepend(el);
+
+  while (liveFeed.children.length > 100) {
+    liveFeed.removeChild(liveFeed.lastChild);
+  }
+}
+
+async function loadLiveHistory() {
+  try {
+    const data = await api("/admin/api/live-history");
+    const events = (data.events || []).slice().reverse();
+    for (const ev of events) prependLiveEvent(ev);
+  } catch {
+    // بی‌سروصدا
+  }
+}
+
+async function connectLiveLogStream() {
+  if (liveAbort) {
+    try {
+      liveAbort.abort();
+    } catch {}
+  }
+  liveAbort = new AbortController();
+  setLiveStatus(false);
+
+  const password = getPassword();
+  if (!password) return;
+
+  try {
+    const res = await fetch("/admin/api/live", {
+      headers: { "x-admin-password": password },
+      signal: liveAbort.signal,
+    });
+    if (!res.ok || !res.body) {
+      setLiveStatus(false);
+      setTimeout(connectLiveLogStream, 4000);
+      return;
+    }
+    setLiveStatus(true);
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const parts = buffer.split("\n\n");
+      buffer = parts.pop() || "";
+      for (const chunk of parts) {
+        const line = chunk
+          .split("\n")
+          .find((l) => l.startsWith("data: "));
+        if (!line) continue;
+        try {
+          const ev = JSON.parse(line.slice(6));
+          prependLiveEvent(ev);
+        } catch {
+          // ignore malformed
+        }
+      }
+    }
+  } catch (err) {
+    if (err?.name === "AbortError") return;
+  }
+
+  setLiveStatus(false);
+  // reconnect
+  setTimeout(() => {
+    if (!appView.classList.contains("hidden") && getPassword()) {
+      connectLiveLogStream();
+    }
+  }, 3000);
+}
+
+if (clearLiveBtn) {
+  clearLiveBtn.addEventListener("click", () => {
+    if (!liveFeed) return;
+    liveFeed.innerHTML =
+      '<div class="live-empty muted">لاگ پاک شد. منتظر رویداد بعدی…</div>';
+    liveSeenIds.clear();
+  });
 }
 
 loginForm.addEventListener("submit", async (e) => {
@@ -207,6 +365,12 @@ loginForm.addEventListener("submit", async (e) => {
 });
 
 logoutBtn.addEventListener("click", () => {
+  if (liveAbort) {
+    try {
+      liveAbort.abort();
+    } catch {}
+  }
+  setLiveStatus(false);
   clearPassword();
   appView.classList.add("hidden");
   loginView.classList.remove("hidden");

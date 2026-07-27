@@ -47,6 +47,24 @@
     </section>
 
     <main class="grid">
+      <section class="panel live-panel">
+        <div class="panel-head">
+          <div class="live-head-row">
+            <div>
+              <h2>📡 لاگ زنده فعالیت</h2>
+              <p>لحظه‌به‌لحظه ببین کدوم کلید تست می‌شه، موفق می‌شه یا می‌افته تو cooldown.</p>
+            </div>
+            <div class="live-controls">
+              <span id="live-conn-status" class="live-dot offline" title="وضعیت اتصال">آفلاین</span>
+              <button id="clear-live" class="ghost small" type="button">پاک کردن</button>
+            </div>
+          </div>
+        </div>
+        <div id="live-feed" class="live-feed">
+          <div class="live-empty muted">منتظر درخواست… وقتی از VS Code یا curl درخواست بزنی، اینجا زنده نمایش داده می‌شه.</div>
+        </div>
+      </section>
+
       <section class="panel">
         <div class="panel-head">
           <h2>کلیدهای دانش‌آموز (Proxy)</h2>

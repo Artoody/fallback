@@ -153,10 +153,13 @@ function requireAdmin(req, res, next) {
 }
 
 // ----------------------------------------------------------------
-// لاگ خطاهای اخیر
+// لاگ خطاهای اخیر + Live Activity (SSE)
 // ----------------------------------------------------------------
 const MAX_ERROR_LOG = 100;
 const errorLog = [];
+const MAX_LIVE_LOG = 200;
+const liveLog = [];
+const liveClients = new Set(); // res objects subscribed to /admin/api/live
 
 function logError({ type, message, clientName, model, status, keyIndex }) {
   errorLog.unshift({
@@ -169,6 +172,28 @@ function logError({ type, message, clientName, model, status, keyIndex }) {
     keyIndex: keyIndex ?? null,
   });
   if (errorLog.length > MAX_ERROR_LOG) errorLog.length = MAX_ERROR_LOG;
+}
+
+/** رویداد زنده برای پنل ادمین — نوع‌ها: request | try | success | fail | cooldown | exhausted | info */
+function emitLive(event) {
+  const entry = {
+    id: crypto.randomUUID(),
+    time: new Date().toISOString(),
+    ...event,
+  };
+  liveLog.unshift(entry);
+  if (liveLog.length > MAX_LIVE_LOG) liveLog.length = MAX_LIVE_LOG;
+
+  const payload = `data: ${JSON.stringify(entry)}\n\n`;
+  for (const client of liveClients) {
+    try {
+      client.write(payload);
+      if (typeof client.flush === "function") client.flush();
+    } catch {
+      liveClients.delete(client);
+    }
+  }
+  return entry;
 }
 
 function trackResult(req, result, extra = {}) {
@@ -371,6 +396,39 @@ app.delete("/admin/api/errors", requireAdmin, (req, res) => {
   res.json({ ok: true });
 });
 
+// تاریخچهٔ زنده (برای رفرش اولیه قبل از وصل شدن به SSE)
+app.get("/admin/api/live-history", requireAdmin, (req, res) => {
+  res.json({ events: liveLog.slice(0, 80) });
+});
+
+// SSE — لاگ زنده فعالیت کلیدها
+app.get("/admin/api/live", requireAdmin, (req, res) => {
+  res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
+  if (typeof res.flushHeaders === "function") res.flushHeaders();
+
+  res.write(`data: ${JSON.stringify({ type: "connected", message: "متصل به لاگ زنده", time: new Date().toISOString() })}\n\n`);
+
+  liveClients.add(res);
+
+  const heartbeat = setInterval(() => {
+    try {
+      res.write(`: ping ${Date.now()}\n\n`);
+    } catch {
+      clearInterval(heartbeat);
+      liveClients.delete(res);
+    }
+  }, 25000);
+  if (typeof heartbeat.unref === "function") heartbeat.unref();
+
+  req.on("close", () => {
+    clearInterval(heartbeat);
+    liveClients.delete(res);
+  });
+});
+
 app.get("/admin/api/models", requireAdmin, async (req, res) => {
   const result = await listGeminiModels({ keyManager });
   if (!result.ok) {
@@ -444,13 +502,26 @@ function getNextKeyIndex(keys) {
   return globalKeyIndex % total;
 }
 
+// فقط این کدها قابل retry هستن (کلید عوض می‌شه و cooldown می‌خوره)
+const OPENAI_RETRYABLE = new Set([429, 500, 502, 503, 504]);
+
 app.post("/v1/chat/completions", requireClientAuth, async (req, res) => {
   const isStreaming = req.body.stream === true;
   const keys = store.getGeminiKeys();
+  const model = req.body?.model || "?";
+  const clientName = req.client?.name || "unknown";
 
   if (!keys || keys.length === 0) {
     return res.status(500).json({ error: "هیچ کلید Geminiای روی سرور تعریف نشده." });
   }
+
+  emitLive({
+    type: "request",
+    message: `درخواست جدید${isStreaming ? " (stream)" : ""}`,
+    clientName,
+    model,
+    detail: isStreaming ? "stream" : "normal",
+  });
 
   let attempts = 0;
   const maxAttempts = keys.length;
@@ -459,53 +530,115 @@ app.post("/v1/chat/completions", requireClientAuth, async (req, res) => {
   let lastErrorData = null;
 
   while (attempts < maxAttempts) {
-    // انتخاب نوبتی کلید و صرف‌نظر از کلیدهای در حال استراحت (Cooldown)
     const keyIndex = getNextKeyIndex(keys);
     const currentGeminiKey = String(keys[keyIndex] || "").trim().replace(/^["']+|["']+$/g, "");
+
+    emitLive({
+      type: "try",
+      message: `آزمایش کلید #${keyIndex + 1}`,
+      clientName,
+      model,
+      keyIndex,
+      attempt: attempts + 1,
+      totalKeys: keys.length,
+    });
 
     try {
       const response = await fetch("https://generativelanguage.googleapis.com/v1beta/openai/chat/completions", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "Authorization": `Bearer ${currentGeminiKey}`
+          Authorization: `Bearer ${currentGeminiKey}`,
         },
-        body: JSON.stringify(req.body)
+        body: JSON.stringify(req.body),
       });
 
       if (!response.ok) {
         let errData;
-        try { errData = await response.json(); } catch { errData = await response.text(); }
+        try {
+          errData = await response.json();
+        } catch {
+          errData = await response.text();
+        }
 
         const errStr = typeof errData === "string" ? errData : JSON.stringify(errData);
-
-        // هر پاسخ غیر از 200 (اعم از 400، 401، 403، 404، 429، 500، 502، 503، 504 و ...)
-        // باعث می‌شود بلافاصله سراغ کلید بعدی برویم. دیگر هیچ status code‌ای
-        // این کلید را مستقیماً به کاربر برنمی‌گرداند مگر اینکه همه‌ی کلیدها تمام شده باشند.
-        console.warn(`[openai] Key #${keyIndex} failed (${response.status}). Placing on 60s cooldown and rotating...`);
-        keyCooldowns.set(keyIndex, Date.now() + 60000);
-
-        logError({
-          type: "key_rotation",
-          message: `Key #${keyIndex} failed (${response.status}): ${errStr}. Placed on 60s cooldown.`,
-          clientName: req.client?.name,
-          model: req.body?.model,
-          status: response.status,
-          keyIndex
-        });
-
-        // آخرین خطا را نگه می‌داریم تا اگر همه‌ی کلیدها تمام شدند، همین را برگردانیم
         lastErrorStatus = response.status;
         lastErrorData = errData;
 
+        // خطای درخواست کلاینت (مدل نامعتبر، body خراب و ...) → بلافاصله به کلاینت برگرد، کلیدها رو نسوزون
+        if (!OPENAI_RETRYABLE.has(response.status) && response.status !== 401 && response.status !== 403) {
+          console.warn(
+            `[openai] Non-retryable ${response.status} on key #${keyIndex} (model=${model}). Returning to client without rotating all keys.`
+          );
+          emitLive({
+            type: "fail",
+            message: `خطای درخواست (کد ${response.status}) — تعویض کلید کمکی نمی‌کند`,
+            clientName,
+            model,
+            keyIndex,
+            status: response.status,
+            detail: String(errStr).slice(0, 200),
+          });
+          logError({
+            type: "client_request_error",
+            message: `Non-retryable ${response.status}: ${errStr}`.slice(0, 500),
+            clientName,
+            model,
+            status: response.status,
+            keyIndex,
+          });
+          trackResult(req, { ok: false, status: response.status, error: errStr, usedKeyIndex: keyIndex }, {
+            type: "openai_non_stream",
+            model,
+          });
+          return res.status(response.status).json(
+            typeof errData === "object" && errData !== null
+              ? errData
+              : { error: { message: errStr, status: response.status } }
+          );
+        }
+
+        // 401/403 یا retryable → cooldown و کلید بعدی
+        const cooldownMs = OPENAI_RETRYABLE.has(response.status) ? 60000 : 30000;
+        console.warn(
+          `[openai] Key #${keyIndex} failed (${response.status}). Cooldown ${cooldownMs / 1000}s and rotating...`
+        );
+        keyCooldowns.set(keyIndex, Date.now() + cooldownMs);
+
+        emitLive({
+          type: "cooldown",
+          message: `کلید #${keyIndex + 1} → cooldown ${cooldownMs / 1000}s (کد ${response.status})`,
+          clientName,
+          model,
+          keyIndex,
+          status: response.status,
+          cooldownMs,
+          detail: String(errStr).slice(0, 180),
+        });
+
+        logError({
+          type: "key_rotation",
+          message: `Key #${keyIndex} failed (${response.status}): ${errStr}. Cooldown ${cooldownMs}ms.`,
+          clientName,
+          model,
+          status: response.status,
+          keyIndex,
+        });
+
         attempts++;
-        continue; // رفتن به کلید بعدی، بدون هیچ استثنایی
+        continue;
       }
 
-      // اگر کلید موفق شد، کول‌داون آن را پاک کن
       keyCooldowns.delete(keyIndex);
 
-      // پاسخ موفق - استریم
+      emitLive({
+        type: "success",
+        message: `موفق با کلید #${keyIndex + 1}${isStreaming ? " (stream)" : ""}`,
+        clientName,
+        model,
+        keyIndex,
+      });
+
       if (isStreaming) {
         res.status(200);
         res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
@@ -514,9 +647,6 @@ app.post("/v1/chat/completions", requireClientAuth, async (req, res) => {
         if (typeof res.flushHeaders === "function") res.flushHeaders();
         streamStarted = true;
 
-        // این بخش جدا از try بیرونی هندل می‌شود: هدرها همین الان ارسال شدند،
-        // پس اگر استریم وسط راه قطع شود دیگر نمی‌توان کلید را عوض کرد.
-        // فقط باید پاسخ را تمیز به پایان برسانیم تا کاربر هنگ نکند.
         try {
           const reader = response.body.getReader();
           while (true) {
@@ -526,58 +656,76 @@ app.post("/v1/chat/completions", requireClientAuth, async (req, res) => {
           }
         } catch (streamErr) {
           console.error(`[openai] Stream broke mid-response on key #${keyIndex}:`, streamErr.message);
+          emitLive({
+            type: "fail",
+            message: `استریم قطع شد: ${streamErr.message}`,
+            clientName,
+            model,
+            keyIndex,
+          });
           logError({
             type: "stream_broken",
             message: streamErr.message,
-            clientName: req.client?.name,
-            model: req.body?.model,
+            clientName,
+            model,
             keyIndex,
           });
         } finally {
           if (!res.writableEnded) res.end();
         }
 
-        trackResult(req, { ok: true, usedKeyIndex: keyIndex }, { type: "openai_stream", model: req.body?.model });
+        trackResult(req, { ok: true, usedKeyIndex: keyIndex }, { type: "openai_stream", model });
         return;
       }
 
-      // پاسخ موفق - عادی
       const data = await response.json();
-      trackResult(req, { ok: true, data, usedKeyIndex: keyIndex }, { type: "openai_non_stream", model: req.body?.model });
+      trackResult(req, { ok: true, data, usedKeyIndex: keyIndex }, { type: "openai_non_stream", model });
       return res.status(200).json(data);
-
     } catch (err) {
       console.error(`[openai] Network error on key #${keyIndex}:`, err.message);
 
-      // اگر هدرها/استریم قبلاً شروع شده باشد، دیگر امکان تعویض کلید نیست
-      // (چون جواب برای کاربر از قبل باز شده). فقط پاسخ را تمیز می‌بندیم
-      // تا کاربر منتظر بی‌نهایت نماند.
       if (streamStarted || res.headersSent) {
         if (!res.writableEnded) res.end();
         return;
       }
 
       keyCooldowns.set(keyIndex, Date.now() + 30000);
+      emitLive({
+        type: "cooldown",
+        message: `خطای شبکه روی کلید #${keyIndex + 1} → cooldown 30s`,
+        clientName,
+        model,
+        keyIndex,
+        detail: err.message,
+      });
       lastErrorStatus = 502;
       lastErrorData = { message: `Network error: ${err.message}`, keyIndex };
       attempts++;
     }
   }
 
+  emitLive({
+    type: "exhausted",
+    message: "تمام کلیدها fail شدند یا در cooldown هستند",
+    clientName,
+    model,
+    status: lastErrorStatus || 429,
+  });
+
   logError({
     type: "openai_all_exhausted",
     message: "تمام کلیدهای Gemini در حال استراحت (Cooldown) یا اتمام سهمیه هستند.",
-    clientName: req.client?.name,
-    model: req.body?.model,
-    status: lastErrorStatus || 429
+    clientName,
+    model,
+    status: lastErrorStatus || 429,
   });
 
   return res.status(lastErrorStatus || 429).json({
     error: {
       message: "تمام کلیدهای Gemini امتحان شدند و هیچ‌کدام پاسخ موفق ندادند. لطفاً ۱ دقیقه دیگر امتحان کنید.",
       allKeysExhausted: true,
-      lastError: lastErrorData || null
-    }
+      lastError: lastErrorData || null,
+    },
   });
 });
 
@@ -598,6 +746,14 @@ app.post("/v1beta/models/:modelAndMethod", requireClientAuth, async (req, res) =
   const query = { ...req.query };
   delete query.key;
 
+  emitLive({
+    type: "request",
+    message: `Gemini native: ${method}`,
+    clientName: req.client?.name,
+    model,
+    detail: method,
+  });
+
   if (method === "streamGenerateContent") {
     let streamStarted = false;
 
@@ -615,6 +771,13 @@ app.post("/v1beta/models/:modelAndMethod", requireClientAuth, async (req, res) =
         res.setHeader("X-Accel-Buffering", "no");
         if (typeof res.flushHeaders === "function") res.flushHeaders();
         console.log(`[stream] client=${req.client.name} key#${keyIndex}`);
+        emitLive({
+          type: "success",
+          message: `استریم شروع شد با کلید #${keyIndex + 1}`,
+          clientName: req.client?.name,
+          model,
+          keyIndex,
+        });
       },
       onChunk: (chunk) => {
         res.write(chunk);
@@ -625,6 +788,14 @@ app.post("/v1beta/models/:modelAndMethod", requireClientAuth, async (req, res) =
     trackResult(req, result, { type: "stream", model });
 
     if (!result.ok) {
+      emitLive({
+        type: result.allKeysExhausted ? "exhausted" : "fail",
+        message: String(result.error || "خطای استریم").slice(0, 200),
+        clientName: req.client?.name,
+        model,
+        keyIndex: result.usedKeyIndex,
+        status: result.status,
+      });
       if (!streamStarted && !res.headersSent) {
         return res.status(result.status || 429).json({
           error: {
@@ -651,6 +822,14 @@ app.post("/v1beta/models/:modelAndMethod", requireClientAuth, async (req, res) =
   trackResult(req, result, { type: "non-stream", model });
 
   if (!result.ok) {
+    emitLive({
+      type: result.allKeysExhausted ? "exhausted" : "fail",
+      message: String(result.error || "خطا").slice(0, 200),
+      clientName: req.client?.name,
+      model,
+      keyIndex: result.usedKeyIndex,
+      status: result.status,
+    });
     return res.status(result.status || 429).json({
       error: {
         message: result.error,
@@ -658,6 +837,14 @@ app.post("/v1beta/models/:modelAndMethod", requireClientAuth, async (req, res) =
       },
     });
   }
+
+  emitLive({
+    type: "success",
+    message: `موفق با کلید #${(result.usedKeyIndex ?? 0) + 1}`,
+    clientName: req.client?.name,
+    model,
+    keyIndex: result.usedKeyIndex,
+  });
 
   return res.status(result.status).json(result.data);
 });
