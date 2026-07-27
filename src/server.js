@@ -422,8 +422,28 @@ app.post("/admin/api/test-prompt", requireAdmin, async (req, res) => {
 });
 
 // ----------------------------------------------------------------
-// FIXED ROUTE: OpenAI-compatible endpoint (/v1/chat/completions)
+// FIXED ROUTE: OpenAI-compatible endpoint with Round-Robin & 60s Cooldown
 // ----------------------------------------------------------------
+let globalKeyIndex = 0;
+const keyCooldowns = new Map();
+
+function getNextKeyIndex(keys) {
+  const now = Date.now();
+  const total = keys.length;
+
+  for (let i = 0; i < total; i++) {
+    const idx = (globalKeyIndex + i) % total;
+    const cooldown = keyCooldowns.get(idx) || 0;
+    if (now >= cooldown) {
+      globalKeyIndex = (idx + 1) % total;
+      return idx;
+    }
+  }
+
+  // اگر همه کلیدها در کول‌داون بودند، فعلاً کلید فعلی را برگردان
+  return globalKeyIndex % total;
+}
+
 app.post("/v1/chat/completions", requireClientAuth, async (req, res) => {
   const isStreaming = req.body.stream === true;
   const keys = store.getGeminiKeys();
@@ -436,7 +456,8 @@ app.post("/v1/chat/completions", requireClientAuth, async (req, res) => {
   const maxAttempts = keys.length;
 
   while (attempts < maxAttempts) {
-    const keyIndex = attempts % keys.length;
+    // انتخاب نوبتی کلید و صرف‌نظر از کلیدهای در حال استراحت (Cooldown)
+    const keyIndex = getNextKeyIndex(keys);
     const currentGeminiKey = String(keys[keyIndex] || "").trim().replace(/^["']+|["']+$/g, "");
 
     try {
@@ -454,22 +475,26 @@ app.post("/v1/chat/completions", requireClientAuth, async (req, res) => {
         try { errData = await response.json(); } catch { errData = await response.text(); }
 
         const errStr = typeof errData === "string" ? errData : JSON.stringify(errData);
-        
-        // اگر ۴۲۹ (سقف سهمیه)، ۴۰۱/۴۰۳ (کلید سوخته) یا ۴۰۰ (Invalid Auth key برای این مدل) داد، به کلید بعدی بچرخ
+
         const isRetryable =
           response.status === 429 ||
           response.status === 401 ||
           response.status === 403 ||
           response.status === 400 ||
+          response.status === 404 ||
           errStr.includes("RESOURCE_EXHAUSTED") ||
           errStr.includes("Quota exceeded") ||
-          errStr.includes("Invalid Auth key");
+          errStr.includes("Invalid Auth key") ||
+          errStr.includes("no longer available");
 
         if (isRetryable) {
-          console.warn(`[openai] Key #${keyIndex} failed (${response.status}). Rotating to next key...`);
+          console.warn(`[openai] Key #${keyIndex} failed (${response.status}). Placing on 60s cooldown and rotating...`);
+          // این کلید را ۶۰ ثانیه در لیست استراحت بگذار تا درخواست‌های بعدی سراغش نیایند
+          keyCooldowns.set(keyIndex, Date.now() + 60000);
+
           logError({
             type: "key_rotation",
-            message: `Key #${keyIndex} failed (${response.status}): ${errStr}`,
+            message: `Key #${keyIndex} failed (${response.status}): ${errStr}. Placed on 60s cooldown.`,
             clientName: req.client?.name,
             model: req.body?.model,
             status: response.status,
@@ -490,6 +515,9 @@ app.post("/v1/chat/completions", requireClientAuth, async (req, res) => {
         }
       }
 
+      // اگر کلید موفق شد، کول‌داون آن را پاک کن
+      keyCooldowns.delete(keyIndex);
+
       // پاسخ موفق - استریم
       if (isStreaming) {
         res.status(200);
@@ -509,20 +537,21 @@ app.post("/v1/chat/completions", requireClientAuth, async (req, res) => {
         return;
       }
 
-      // پاسخ موفق - معمولی
+      // پاسخ موفق - عادی
       const data = await response.json();
       trackResult(req, { ok: true, data, usedKeyIndex: keyIndex }, { type: "openai_non_stream", model: req.body?.model });
       return res.status(200).json(data);
 
     } catch (err) {
       console.error(`[openai] Network error on key #${keyIndex}:`, err.message);
+      keyCooldowns.set(keyIndex, Date.now() + 30000);
       attempts++;
     }
   }
 
   logError({
     type: "openai_all_exhausted",
-    message: "تمام کلیدهای Gemini برای این مدل نامعتبر هستند یا به سقف سهمیه رسیده‌اند.",
+    message: "تمام کلیدهای Gemini در حال استراحت (Cooldown) یا اتمام سهمیه هستند.",
     clientName: req.client?.name,
     model: req.body?.model,
     status: 429
@@ -530,7 +559,7 @@ app.post("/v1/chat/completions", requireClientAuth, async (req, res) => {
 
   return res.status(429).json({
     error: {
-      message: "تمام کلیدهای Gemini برای این مدل نامعتبر هستند یا به سقف سهمیه (Quota) رسیده‌اند. لطفاً کلیدهای خود را در پنل /admin چک کنید.",
+      message: "تمام کلیدهای Gemini در حال استراحت (Cooldown) یا اتمام سهمیه (Quota) هستند. لطفاً ۱ دقیقه دیگر امتحان کنید.",
       allKeysExhausted: true
     }
   });
