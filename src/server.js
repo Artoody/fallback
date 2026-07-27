@@ -437,15 +437,15 @@ app.post("/v1/chat/completions", requireClientAuth, async (req, res) => {
 
   while (attempts < maxAttempts) {
     const keyIndex = attempts % keys.length;
-    const currentGeminiKey = keys[keyIndex];
+    const currentGeminiKey = String(keys[keyIndex] || "").trim();
 
     try {
-      // ارسال کلید در ?key= و x-goog-api-key جهت جلوگیری از خطای ۴۰۱ ACCESS_TOKEN_TYPE_UNSUPPORTED
-      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/openai/chat/completions?key=${currentGeminiKey}`, {
+      // فرمت استاندارد گوگل برای اندپوینت OpenAI فقط شامل هدر Authorization است
+      const response = await fetch("https://generativelanguage.googleapis.com/v1beta/openai/chat/completions", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "x-goog-api-key": currentGeminiKey
+          "Authorization": `Bearer ${currentGeminiKey}`
         },
         body: JSON.stringify(req.body)
       });
