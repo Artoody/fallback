@@ -422,72 +422,97 @@ app.post("/admin/api/test-prompt", requireAdmin, async (req, res) => {
 });
 
 // ----------------------------------------------------------------
-// NEW ROUTE: OpenAI-compatible endpoint (/v1/chat/completions) for VS Code / Cline
+// FIXED ROUTE: OpenAI-compatible endpoint (/v1/chat/completions)
 // ----------------------------------------------------------------
 app.post("/v1/chat/completions", requireClientAuth, async (req, res) => {
   const isStreaming = req.body.stream === true;
-  const pathUrl = "/v1beta/openai/chat/completions";
+  const keys = store.getGeminiKeys();
 
-  if (isStreaming) {
-    let streamStarted = false;
+  if (!keys || keys.length === 0) {
+    return res.status(500).json({ error: "هیچ کلید Geminiای روی سرور تعریف نشده." });
+  }
 
-    const result = await callGeminiStream({
-      keyManager,
-      path: pathUrl,
-      body: req.body,
-      onStart: (keyIndex) => {
-        streamStarted = true;
+  let attempts = 0;
+  const maxAttempts = keys.length;
+
+  while (attempts < maxAttempts) {
+    const keyIndex = attempts % keys.length;
+    const currentGeminiKey = keys[keyIndex];
+
+    try {
+      const response = await fetch("https://generativelanguage.googleapis.com/v1beta/openai/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${currentGeminiKey}`
+        },
+        body: JSON.stringify(req.body)
+      });
+
+      if (!response.ok) {
+        let errData;
+        try { errData = await response.json(); } catch { errData = await response.text(); }
+
+        const errStr = typeof errData === "string" ? errData : JSON.stringify(errData);
+        if (response.status === 429 || errStr.includes("RESOURCE_EXHAUSTED") || errStr.includes("Quota exceeded")) {
+          console.warn(`[openai] Key #${keyIndex} hit quota (429). Rotating key...`);
+          attempts++;
+          continue;
+        } else {
+          logError({
+            type: "openai_error",
+            message: errStr,
+            clientName: req.client?.name,
+            model: req.body?.model,
+            status: response.status,
+            keyIndex
+          });
+          return res.status(response.status).json(errData);
+        }
+      }
+
+      if (isStreaming) {
         res.status(200);
         res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
         res.setHeader("Cache-Control", "no-cache, no-transform");
         res.setHeader("Connection", "keep-alive");
         if (typeof res.flushHeaders === "function") res.flushHeaders();
-        console.log(`[openai-stream] client=${req.client.name} key#${keyIndex}`);
-      },
-      onChunk: (chunk) => {
-        res.write(chunk);
-        if (typeof res.flush === "function") res.flush();
-      },
-    });
 
-    trackResult(req, result, { type: "openai_stream", model: req.body.model });
-
-    if (!result.ok) {
-      if (!streamStarted && !res.headersSent) {
-        return res.status(result.status || 429).json({
-          error: {
-            message: result.error,
-            allKeysExhausted: result.allKeysExhausted || false,
-          },
-        });
+        const reader = response.body.getReader();
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          res.write(value);
+        }
+        res.end();
+        trackResult(req, { ok: true, usedKeyIndex: keyIndex }, { type: "openai_stream", model: req.body?.model });
+        return;
       }
-      res.end();
-      return;
-    }
 
-    res.end();
-    return;
+      const data = await response.json();
+      trackResult(req, { ok: true, data, usedKeyIndex: keyIndex }, { type: "openai_non_stream", model: req.body?.model });
+      return res.status(200).json(data);
+
+    } catch (err) {
+      console.error(`[openai] Network error on key #${keyIndex}:`, err.message);
+      attempts++;
+    }
   }
 
-  // Non-streaming
-  const result = await callGeminiNonStream({
-    keyManager,
-    path: pathUrl,
-    body: req.body,
+  logError({
+    type: "openai_all_exhausted",
+    message: "تمام کلیدهای Gemini به سقف سهمیه (Quota) رسیده‌اند.",
+    clientName: req.client?.name,
+    model: req.body?.model,
+    status: 429
   });
 
-  trackResult(req, result, { type: "openai_non_stream", model: req.body.model });
-
-  if (!result.ok) {
-    return res.status(result.status || 429).json({
-      error: {
-        message: result.error,
-        allKeysExhausted: result.allKeysExhausted || false,
-      },
-    });
-  }
-
-  return res.status(result.status).json(result.data);
+  return res.status(429).json({
+    error: {
+      message: "تمام کلیدهای Gemini به سقف سهمیه (Quota) رسیده‌اند. لطفاً بعداً تلاش کنید.",
+      allKeysExhausted: true
+    }
+  });
 });
 
 // ----------------------------------------------------------------
