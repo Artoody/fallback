@@ -9,7 +9,11 @@
   },
   "scripts": {
     "start": "node src/server.js",
-    "dev": "node --watch src/server.js"
+    "dev": "node --watch src/server.js",
+    "test": "node --test test/unit/*.test.js test/integration/*.test.js",
+    "test:integration": "node --test test/integration/*.test.js",
+    "test:codex": "node scripts/test-codex.js",
+    "stress": "node test/stress.js"
   },
   "dependencies": {
     "express": "^4.19.2",
