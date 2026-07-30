@@ -1,15 +1,25 @@
 // keyManager.js
 // مسئول نگهداری لیست API key ها، وضعیت هرکدوم، و انتخاب کلید بعدی برای استفاده
 
-const COOLDOWN_MS = parseInt(process.env.KEY_COOLDOWN_MS || "60000", 10);
-// کلیدهای نامعتبر را مدت طولانی‌تری کنار می‌گذاریم تا مدام امتحان نشوند
-const INVALID_KEY_COOLDOWN_MS = parseInt(process.env.INVALID_KEY_COOLDOWN_MS || String(24 * 60 * 60 * 1000), 10);
-
 class KeyManager {
-  constructor(keys) {
+  constructor(
+    keys,
+    {
+      cooldownMs = parseInt(process.env.KEY_COOLDOWN_MS || "60000", 10),
+      invalidKeyCooldownMs = parseInt(
+        process.env.INVALID_KEY_COOLDOWN_MS || String(24 * 60 * 60 * 1000),
+        10
+      ),
+      now = () => Date.now(),
+    } = {}
+  ) {
     if (!keys || keys.length === 0) {
       throw new Error("هیچ API keyـی تعریف نشده. مقدار GEMINI_API_KEYS رو در .env چک کن.");
     }
+    this.cooldownMs = cooldownMs;
+    this.invalidKeyCooldownMs = invalidKeyCooldownMs;
+    this.now = now;
+    this.nextStartIndex = 0;
     // هر کلید یه آبجکت وضعیت داره: خودِ کلید، زمانی که تا اون موقع نباید استفاده بشه (بخاطر rate limit)، و شمارنده خطا
     this.keys = keys.map((key, idx) => ({
       key,
@@ -20,53 +30,59 @@ class KeyManager {
     }));
   }
 
-  // لیست کلیدهایی که الان قابل استفاده‌ان (تو cooldown نیستن)، به ترتیب اولویت و نوبت در صف
+  /**
+   * یک snapshot از کلیدهای آماده می‌سازد. نقطه شروع برای هر درخواست جلو
+   * می‌رود تا درخواست‌های همزمان همگی روی کلید اول stampede نکنند.
+   * کلیدهای cooldown شده هرگز در snapshot برگردانده نمی‌شوند.
+   */
   getAvailableOrder() {
-    const now = Date.now();
-    const free = this.keys.filter((k) => k.blockedUntil <= now);
-    const blocked = this.keys.filter((k) => k.blockedUntil > now && !k.invalid);
-    const invalid = this.keys.filter((k) => k.invalid && k.blockedUntil > now);
-    // اول کلیدهای سالم، بعد rate-limited، آخر نامعتبرها
-    return [...free, ...blocked, ...invalid];
+    const now = this.now();
+    const total = this.keys.length;
+    const ordered = [];
+
+    for (let offset = 0; offset < total; offset += 1) {
+      const position = (this.nextStartIndex + offset) % total;
+      const keyObj = this.keys[position];
+      if (keyObj.blockedUntil <= now) ordered.push(keyObj);
+    }
+
+    this.nextStartIndex = (this.nextStartIndex + 1) % total;
+    return ordered;
+  }
+
+  retryAfterMs() {
+    const now = this.now();
+    const waits = this.keys
+      .map((keyObj) => Math.max(0, keyObj.blockedUntil - now))
+      .filter((wait) => wait > 0);
+    return waits.length > 0 ? Math.min(...waits) : 0;
   }
 
   markSuccess(keyObj) {
     keyObj.failCount = 0;
     keyObj.blockedUntil = 0;
     keyObj.invalid = false;
-    keyObj.lastUsed = Date.now();
-    this.#moveToEnd(keyObj);
+    keyObj.lastUsed = this.now();
   }
 
-  markRateLimited(keyObj) {
+  markRateLimited(keyObj, cooldownMs = this.cooldownMs) {
     keyObj.failCount += 1;
-    keyObj.blockedUntil = Date.now() + COOLDOWN_MS;
+    keyObj.blockedUntil = this.now() + cooldownMs;
     keyObj.invalid = false;
-    this.#moveToEnd(keyObj);
   }
 
   /** کلید نامعتبر (API_KEY_INVALID) — cooldown طولانی + اولویت آخر */
   markInvalid(keyObj) {
     keyObj.failCount += 1;
     keyObj.invalid = true;
-    keyObj.blockedUntil = Date.now() + INVALID_KEY_COOLDOWN_MS;
-    this.#moveToEnd(keyObj);
+    keyObj.blockedUntil = this.now() + this.invalidKeyCooldownMs;
     console.warn(`[keyManager] کلید #${keyObj.index} نامعتبر تشخیص داده شد و موقتاً کنار گذاشته شد.`);
   }
 
-  #moveToEnd(keyObj) {
-    const idx = this.keys.indexOf(keyObj);
-    if (idx !== -1) {
-      this.keys.splice(idx, 1);
-      this.keys.push(keyObj);
-    }
-  }
-
   status() {
-    const now = Date.now();
+    const now = this.now();
     return this.keys.map((k) => ({
       index: k.index,
-      keyPreview: k.key.slice(0, 6) + "...",
       blocked: k.blockedUntil > now,
       blockedForMs: Math.max(0, k.blockedUntil - now),
       failCount: k.failCount,
@@ -94,6 +110,7 @@ class KeyManager {
         lastUsed: 0,
       };
     });
+    this.nextStartIndex %= this.keys.length;
   }
 
   addKey(key) {
@@ -116,6 +133,7 @@ class KeyManager {
     this.keys.forEach((k, i) => {
       k.index = i;
     });
+    this.nextStartIndex %= this.keys.length;
   }
 }
 
