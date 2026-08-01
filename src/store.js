@@ -6,26 +6,25 @@ import crypto from "crypto";
 import { fileURLToPath } from "url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "..", "data");
-const STORE_PATH = path.join(DATA_DIR, "store.json");
+const DEFAULT_DATA_DIR = path.join(__dirname, "..", "data");
 
 function emptyStore() {
   return { geminiKeys: [], clients: [] };
 }
 
-function ensureDir() {
-  if (!fs.existsSync(DATA_DIR)) {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
+function ensureDir(dataDir) {
+  if (!fs.existsSync(dataDir)) {
+    fs.mkdirSync(dataDir, { recursive: true });
   }
 }
 
-function loadRaw() {
-  ensureDir();
-  if (!fs.existsSync(STORE_PATH)) {
+function loadRaw(storePath) {
+  ensureDir(path.dirname(storePath));
+  if (!fs.existsSync(storePath)) {
     return emptyStore();
   }
   try {
-    const raw = fs.readFileSync(STORE_PATH, "utf8");
+    const raw = fs.readFileSync(storePath, "utf8");
     const parsed = JSON.parse(raw);
     return {
       geminiKeys: Array.isArray(parsed.geminiKeys) ? parsed.geminiKeys : [],
@@ -37,13 +36,13 @@ function loadRaw() {
   }
 }
 
-function saveRaw(data) {
-  ensureDir();
-  fs.writeFileSync(STORE_PATH, JSON.stringify(data, null, 2), "utf8");
+function saveRaw(storePath, data) {
+  ensureDir(path.dirname(storePath));
+  fs.writeFileSync(storePath, JSON.stringify(data, null, 2), "utf8");
 }
 
 // نوشتن روی دیسک با تاخیر و دسته‌ای (debounce) — به‌جای نوشتن روی هر درخواست تکی
-const PERSIST_DEBOUNCE_MS = parseInt(process.env.STORE_PERSIST_DEBOUNCE_MS || "2000", 10);
+const DEFAULT_PERSIST_DEBOUNCE_MS = 2000;
 
 function generateKey() {
   return crypto.randomBytes(32).toString("hex");
@@ -61,9 +60,37 @@ function newClientStats() {
   };
 }
 
+const ENV_PROXY_SOURCE = "env-proxy";
+const ENV_PROXY_NAME = "کلید اصلی (.env)";
+
+function mergeClientStats(clients) {
+  const merged = newClientStats();
+  for (const client of clients) {
+    const stats = { ...newClientStats(), ...(client?.stats || {}) };
+    merged.requests += Number(stats.requests || 0);
+    merged.success += Number(stats.success || 0);
+    merged.errors += Number(stats.errors || 0);
+    merged.promptTokens += Number(stats.promptTokens || 0);
+    merged.candidatesTokens += Number(stats.candidatesTokens || 0);
+    merged.totalTokens += Number(stats.totalTokens || 0);
+    if (stats.lastUsedAt && (!merged.lastUsedAt || stats.lastUsedAt > merged.lastUsedAt)) {
+      merged.lastUsedAt = stats.lastUsedAt;
+    }
+  }
+  return merged;
+}
+
 class Store {
-  constructor() {
-    this.data = loadRaw();
+  constructor({
+    dataDir = process.env.DATA_DIR || DEFAULT_DATA_DIR,
+    persistDebounceMs = parseInt(
+      process.env.STORE_PERSIST_DEBOUNCE_MS || String(DEFAULT_PERSIST_DEBOUNCE_MS),
+      10
+    ),
+  } = {}) {
+    this.storePath = path.join(dataDir || DEFAULT_DATA_DIR, "store.json");
+    this.persistDebounceMs = persistDebounceMs;
+    this.data = loadRaw(this.storePath);
     this._persistTimer = null;
   }
 
@@ -73,7 +100,7 @@ class Store {
       clearTimeout(this._persistTimer);
       this._persistTimer = null;
     }
-    saveRaw(this.data);
+    saveRaw(this.storePath, this.data);
   }
 
   /** نوشتن با تاخیر (برای آمار پرتکرار مثل recordUsage) — چند رخداد را در یک نوشتن دیسک جمع می‌کند */
@@ -81,8 +108,8 @@ class Store {
     if (this._persistTimer) return;
     this._persistTimer = setTimeout(() => {
       this._persistTimer = null;
-      saveRaw(this.data);
-    }, PERSIST_DEBOUNCE_MS);
+      saveRaw(this.storePath, this.data);
+    }, this.persistDebounceMs);
     if (typeof this._persistTimer.unref === "function") this._persistTimer.unref();
   }
 
@@ -92,7 +119,7 @@ class Store {
       clearTimeout(this._persistTimer);
       this._persistTimer = null;
     }
-    saveRaw(this.data);
+    saveRaw(this.storePath, this.data);
   }
 
   // ---------- Gemini keys ----------
@@ -148,6 +175,7 @@ class Store {
       key: c.key,
       keyPreview: c.key.slice(0, 8) + "…" + c.key.slice(-4),
       enabled: c.enabled !== false,
+      source: c.source || "admin",
       createdAt: c.createdAt,
       stats: { ...newClientStats(), ...(c.stats || {}) },
     }));
@@ -170,6 +198,7 @@ class Store {
       name: n,
       key: clientKey,
       enabled: true,
+      source: "admin",
       createdAt: new Date().toISOString(),
       stats: newClientStats(),
     };
@@ -226,7 +255,14 @@ class Store {
     this.persistDebounced();
   }
 
-  /** seed اولیه از env اگر store خالی باشد */
+  /**
+   * Seed اولیه از env.
+   *
+   * PROXY_API_KEY یک credential مدیریتی پایدار است، نه یک کلاینت جدید در هر
+   * deploy. نسخه‌های قبلی بعد از rotation رکورد قدیمی را نگه می‌داشتند و
+   * credential لو رفته همچنان معتبر می‌ماند. این migration همه رکوردهای
+   * legacy مربوط به env را در یک رکورد ادغام و کلید آن را با env همگام می‌کند.
+   */
   seedFromEnv({ geminiKeys = [], proxyApiKey } = {}) {
     let changed = false;
     if (this.data.geminiKeys.length === 0 && geminiKeys.length > 0) {
@@ -234,21 +270,64 @@ class Store {
       changed = true;
       console.log(`[store] ${geminiKeys.length} کلید Gemini از env به store منتقل شد.`);
     }
-    if (
-      proxyApiKey &&
-      proxyApiKey !== "CHANGE_ME_TO_A_LONG_RANDOM_SECRET" &&
-      !this.data.clients.some((c) => c.key === proxyApiKey)
-    ) {
-      this.data.clients.push({
-        id: crypto.randomUUID(),
-        name: "کلید اصلی (.env)",
-        key: proxyApiKey,
-        enabled: true,
-        createdAt: new Date().toISOString(),
-        stats: newClientStats(),
-      });
-      changed = true;
-      console.log("[store] PROXY_API_KEY از env به‌عنوان کلاینت اولیه ثبت شد.");
+    if (proxyApiKey && proxyApiKey !== "CHANGE_ME_TO_A_LONG_RANDOM_SECRET") {
+      const candidates = this.data.clients.filter(
+        (client) =>
+          client.source === ENV_PROXY_SOURCE ||
+          client.name === ENV_PROXY_NAME ||
+          client.key === proxyApiKey
+      );
+
+      let envClient = candidates.find((client) => client.key === proxyApiKey);
+      if (!envClient) {
+        envClient = candidates.find((client) => client.source === ENV_PROXY_SOURCE);
+      }
+      if (!envClient && candidates.length > 0) {
+        envClient = [...candidates].sort((a, b) =>
+          String(b.createdAt || "").localeCompare(String(a.createdAt || ""))
+        )[0];
+      }
+
+      if (!envClient) {
+        envClient = {
+          id: crypto.randomUUID(),
+          name: ENV_PROXY_NAME,
+          key: proxyApiKey,
+          enabled: true,
+          source: ENV_PROXY_SOURCE,
+          createdAt: new Date().toISOString(),
+          stats: newClientStats(),
+        };
+        this.data.clients.push(envClient);
+        changed = true;
+        console.log("[store] PROXY_API_KEY از env به‌عنوان کلاینت اولیه ثبت شد.");
+      } else {
+        const mergedStats = mergeClientStats(candidates);
+        const duplicateIds = new Set(
+          candidates.filter((client) => client !== envClient).map((client) => client.id)
+        );
+
+        if (
+          envClient.key !== proxyApiKey ||
+          envClient.name !== ENV_PROXY_NAME ||
+          envClient.enabled === false ||
+          envClient.source !== ENV_PROXY_SOURCE ||
+          duplicateIds.size > 0
+        ) {
+          envClient.key = proxyApiKey;
+          envClient.name = ENV_PROXY_NAME;
+          envClient.enabled = true;
+          envClient.source = ENV_PROXY_SOURCE;
+          envClient.stats = mergedStats;
+          this.data.clients = this.data.clients.filter(
+            (client) => client === envClient || !duplicateIds.has(client.id)
+          );
+          changed = true;
+          console.log(
+            `[store] رکورد PROXY_API_KEY با env همگام شد${duplicateIds.size ? ` و ${duplicateIds.size} رکورد قدیمی حذف شد` : ""}.`
+          );
+        }
+      }
     }
     if (changed) this.persist();
   }
